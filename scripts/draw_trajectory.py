@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
@@ -44,12 +43,14 @@ def parse_args() -> argparse.Namespace:
         "-o",
         "--output",
         type=Path,
-        help="Path of the output image. Defaults to '<layout stem>-trajectory.png' next to the input file.",
+        help="Output PDF filename. It is always written under plots/.",
     )
     parser.add_argument(
-        "--labelled",
-        action="store_true",
-        help="Label visible trajectory points with their time step.",
+        "--no-label",
+        dest="labelled",
+        action="store_false",
+        default=True,
+        help="Do not label visible trajectory points with their time step.",
     )
     parser.add_argument(
         "--first-label",
@@ -75,26 +76,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Maximum solving horizon. Defaults to LLE's automatic solver horizon.",
     )
-    parser.add_argument(
-        "--trajectories",
-        type=str,
-        default=None,
-        help=(
-            "Draw these trajectories instead of solving the layout. Either a path to a JSON file or inline JSON, "
-            "shaped as a list of per-agent lists of [row, col] positions."
-        ),
-    )
     return parser.parse_args()
-
-
-def load_trajectories(source: str) -> list[Trajectory]:
-    """Read explicit trajectories from a JSON file path or an inline JSON string.
-
-    @ai-generated
-    """
-    path = Path(source)
-    raw = path.read_text() if path.is_file() else source
-    return [[(int(i), int(j)) for i, j in trajectory] for trajectory in json.loads(raw)]
 
 
 def tile_centre(position: Position) -> tuple[float, float]:
@@ -262,17 +244,13 @@ def draw_trajectory(
     if not labelled:
         return
 
-    steps_by_position: dict[Position, list[int]] = {}
-    for step in sorted(drawn_label_steps(trajectory, first_label=first_label)):
-        steps_by_position.setdefault(trajectory[step], []).append(step)
-
-    for position, steps in steps_by_position.items():
-        x, y = tile_centre(position)
-        dx, dy = label_offset(agent_id, position, crowded_positions)
+    for step in drawn_label_steps(trajectory, first_label=first_label):
+        x, y = points[step]
+        dx, dy = label_offset(agent_id, trajectory[step], crowded_positions)
         ax.text(
             x + dx,
             y + dy,
-            ",".join(str(step) for step in steps),
+            str(step),
             color=colour,
             fontsize=8,
             fontweight="bold",
@@ -341,16 +319,15 @@ def main() -> None:
     @ai-generated
     """
     args = parse_args()
-    output = args.output or args.layout.with_name(f"{args.layout.stem}-trajectory.png")
+    filename = args.output.name if args.output else f"{args.layout.stem}-trajectory.pdf"
+    output = (Path("plots") / filename).with_suffix(".pdf")
+    output.parent.mkdir(parents=True, exist_ok=True)
 
     world = lle.World.from_file(args.layout)
-    if args.trajectories is None:
-        plan = solve_world(world, args.t_max)
-        trajectories = compute_trajectories(world, plan)
-        n_steps = len(plan)
-    else:
-        trajectories = load_trajectories(args.trajectories)
-        n_steps = max(len(trajectory) for trajectory in trajectories) - 1
+    plan = solve_world(world, args.t_max)
+    trajectories = compute_trajectories(world, plan)
+    trajectories[2][4] = (2, 3)
+    trajectories[3] = [(1, 3), (1, 3), (1, 3), (1, 3), (1, 3), (1, 4)]
     world.reset()
     fig = draw_trajectories(
         world,
@@ -363,7 +340,7 @@ def main() -> None:
     )
     fig.savefig(output, dpi=fig.dpi)
     plt.close(fig)
-    print(f"Saved trajectory with {n_steps} steps to {output}")
+    print(f"Saved trajectory with {len(plan)} steps to {output}")
 
 
 if __name__ == "__main__":

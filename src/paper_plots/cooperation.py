@@ -1,6 +1,7 @@
+"""Cooperation-profile sweep analysis and presentation."""
+
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -122,72 +123,6 @@ plt.rcParams.update(
         "grid.alpha": 0.4,
     }
 )
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse the input log root and the output destinations.
-
-    @ai-generated
-    """
-    parser = argparse.ArgumentParser(
-        description="Analyse the cooperation-profile sweep from the final-policy evaluations."
-    )
-    parser.add_argument(
-        "--logs", type=Path, default=Path("logs"), help="Experiment log root."
-    )
-    parser.add_argument(
-        "--layout-data",
-        type=Path,
-        default=Path("data"),
-        help="Directory holding the per-layout laser-colour tables.",
-    )
-    parser.add_argument(
-        "--data",
-        type=Path,
-        default=Path("data"),
-        help="Destination directory for the aggregated CSVs.",
-    )
-    parser.add_argument(
-        "--plots",
-        type=Path,
-        default=Path("latex/plots"),
-        help="Destination for the figures.",
-    )
-    parser.add_argument(
-        "--tables",
-        type=Path,
-        default=Path("tables"),
-        help="Destination for the generated LaTeX table.",
-    )
-    parser.add_argument(
-        "--refresh",
-        action="store_true",
-        help="Re-read every run CSV instead of reusing the cached per-run curves.",
-    )
-    parser.add_argument(
-        "--table",
-        action="store_true",
-        help="Generate only the algorithm-by-profile LaTeX table.",
-    )
-    for name, help_text in PLOT_CHOICES.items():
-        parser.add_argument(
-            f"--{name}",
-            action="store_true",
-            help=f"Render only this figure: {help_text}",
-        )
-    args = parser.parse_args()
-    requested_plots = {name for name in PLOT_CHOICES if getattr(args, name)}
-    # With nothing requested, every figure, table and CSV is generated. A selected plot
-    # or --table skips unrelated outputs, including the slow permutation-test tables.
-    args.full_run = not requested_plots and not args.table
-    args.plot_selection = (
-        requested_plots
-        if requested_plots
-        else set(PLOT_CHOICES)
-        if args.full_run
-        else set()
-    )
-    return args
 
 
 def discover_experiments(log_root: Path) -> list[tuple[str, str, Path]]:
@@ -1740,13 +1675,12 @@ def plot_algorithm_heatmap(metrics: pl.DataFrame, output_stem: Path) -> None:
 
 
 def save(figure: plt.Figure, output_stem: Path) -> None:
-    """Write a figure as both the PDF used by the article and the PNG used by the report.
+    """Write a figure as a PDF.
 
     @ai-generated
     """
     output_stem.parent.mkdir(parents=True, exist_ok=True)
-    for suffix in (".pdf", ".png"):
-        figure.savefig(output_stem.with_suffix(suffix), dpi=200, bbox_inches="tight")
+    figure.savefig(output_stem.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(figure)
 
 
@@ -1807,190 +1741,382 @@ def widest_pair(
     return best
 
 
-def main() -> None:
-    """Aggregate the sweep, write every CSV used by the report and render the figures.
-
-    @ai-generated
-    """
-    args = parse_args()
-    args.data.mkdir(parents=True, exist_ok=True)
-    args.plots.mkdir(parents=True, exist_ok=True)
-    args.tables.mkdir(parents=True, exist_ok=True)
-    curves = load_curves(args.logs, args.data, refresh=args.refresh)
-
-    if args.full_run:
-        coverage(curves).write_csv(args.data / "coverage.csv")
-
-    curves, common_seeds = restrict_to_common_seeds(curves)
-    print(f"Using {len(common_seeds)} common seeds")
-
-    plottable = drop_thin_cells(curves, MIN_CELL_RUNS)
-    test_curves = plottable.filter(pl.col("pool") == "test")
-    train_curves = plottable.filter(pl.col("pool") == "train")
-    test_summary = aggregate_curve(test_curves)
-    train_summary = aggregate_curve(train_curves)
-    if args.full_run or "curves" in args.plot_selection:
-        test_summary.write_csv(args.data / "test_curves.csv")
-        train_summary.write_csv(args.data / "train_curves.csv")
-    if "curves" in args.plot_selection:
-        plot_curves(test_summary, args.plots / "coop-profiles-test")
-        plot_curves(train_summary, args.plots / "coop-profiles-train")
-
-    metrics = run_level_metrics(curves)
-    test_metrics = metrics.filter(pl.col("pool") == "test")
-    if args.full_run or {"difficulty", "heatmap"} & args.plot_selection:
-        metrics.write_csv(args.data / "run_metrics.csv")
-    algorithm_profile_summary = summarise(test_metrics, "profile", "algorithm")
-    if args.full_run or args.table:
-        algorithm_profile_summary.write_csv(args.data / "profile_algorithm_summary.csv")
-        algorithm_average_summary = average_final_across_profiles(test_metrics)
-        profile_average_summary = average_final_across_algorithms(test_metrics)
-        table_path = args.tables / "profile_algorithm_table.tex"
-        table_path.write_text(
-            format_algorithm_profile_table(
-                algorithm_profile_summary,
-                algorithm_average_summary,
-                profile_average_summary,
-            )
-        )
-        print(f"Wrote {table_path}")
-    if args.full_run:
-        summarise(test_metrics, "profile").write_csv(args.data / "profile_summary.csv")
-        summarise(metrics, "profile", "algorithm", "pool").write_csv(
-            args.data / "pool_summary.csv"
-        )
-
-    need_gap = args.full_run or "gap" in args.plot_selection
-    trajectory = gap_trajectory(curves) if need_gap else pl.DataFrame()
-    if need_gap and not trajectory.is_empty():
-        trajectory.write_csv(args.data / "gap_trajectory.csv")
-        (
-            trajectory.group_by("profile", "algorithm", "time_step")
-            .agg(
-                pl.len().alias("n"),
-                pl.col("train_exit_rate").mean(),
-                pl.col("test_exit_rate").mean(),
-                pl.col("gap").mean(),
-                (1.96 * pl.col("gap").std() / pl.len().sqrt()).alias("gap_ci"),
-            )
-            .sort("profile", "algorithm", "time_step")
-            .write_csv(args.data / "gap_trajectory_summary.csv")
-        )
-        if "gap" in args.plot_selection:
-            plot_gap_trajectory(trajectory, args.plots / "coop-profiles-gap")
-
-    all_profiles = sorted(test_metrics["profile"].unique().to_list())
-    balanced, profiles, shared = common_grid(test_metrics, all_profiles, MIN_CELL_RUNS)
-    pair_metrics, pair_profiles, pair_shared = widest_pair(test_metrics, MIN_CELL_RUNS)
-    rng = np.random.default_rng(RNG_SEED)
-    layout_curve_summary = pl.DataFrame()
-    layout_summary = pl.DataFrame()
-    layout_pairwise = pl.DataFrame()
-    if (
-        args.full_run or "difficulty" in args.plot_selection
-    ) and not balanced.is_empty():
-        layout_curves = load_test_layout_curves(
-            args.logs,
-            args.data,
-            refresh=args.refresh,
-            selected_seeds=set(common_seeds),
-        )
-        layout_curve_summary = layout_curve_block_bootstrap(
-            layout_curves,
-            profiles,
-            shared,
-            np.random.default_rng(RNG_SEED),
-        )
-        if not layout_curve_summary.is_empty():
-            layout_curve_summary.write_csv(args.data / "layout_bootstrap_curves.csv")
-        layout_scores = load_final_layout_scores(
-            args.logs,
-            args.data,
-            refresh=args.refresh,
-        )
-        layout_scores = layout_scores.filter(pl.col("seed").is_in(common_seeds))
-        layout_summary, layout_pairwise = layout_block_bootstrap(
-            layout_scores, profiles, shared, rng
-        )
-        if not layout_summary.is_empty():
-            layout_summary.write_csv(args.data / "layout_bootstrap_summary.csv")
-        if not layout_pairwise.is_empty():
-            layout_pairwise.write_csv(args.data / "layout_bootstrap_pairwise.csv")
-    if (
-        "difficulty" in args.plot_selection
-        and not layout_curve_summary.is_empty()
-        and not layout_summary.is_empty()
-    ):
-        plot_difficulty(
-            layout_curve_summary,
-            layout_summary,
-            args.plots / "coop-profiles-difficulty",
-        )
-    # The figure shows only cells with enough seeds; the per-cell tables in the report
-    # still quote the thin cells, but always with their run count.
-    if "heatmap" in args.plot_selection:
-        plot_algorithm_heatmap(
-            drop_thin_cells(test_metrics, MIN_CELL_RUNS),
-            args.plots / "coop-profiles-heatmaps",
-        )
-
-    # The pairwise/interaction significance tables below are permutation tests
-    # (N_PERMUTATIONS each) and are not consumed by any figure, so a partial plot
-    # selection skips them entirely rather than paying for tables nobody asked for.
-    if args.full_run:
-        if not balanced.is_empty():
-            compare_profiles(balanced, profiles, rng).write_csv(
-                args.data / "profile_pairwise_balanced.csv"
-            )
-            compare_profiles(balanced, profiles, rng, metric="gain").write_csv(
-                args.data / "profile_pairwise_gain.csv"
-            )
-            compare_profiles_blocked(balanced, profiles, rng).write_csv(
-                args.data / "profile_pairwise_blocked.csv"
-            )
-            compare_profiles_blocked(balanced, profiles, rng, metric="gain").write_csv(
-                args.data / "profile_pairwise_blocked_gain.csv"
-            )
-            blocked_profile_summary(balanced).write_csv(
-                args.data / "profile_summary_blocked.csv"
-            )
-            summarise(balanced, "profile").write_csv(
-                args.data / "profile_summary_grid.csv"
-            )
-            interaction_test(balanced, rng).write_csv(
-                args.data / "algorithm_interaction.csv"
-            )
-        if not pair_metrics.is_empty():
-            compare_profiles(pair_metrics, pair_profiles, rng).write_csv(
-                args.data / "profile_pairwise_widest.csv"
-            )
-            summarise(pair_metrics, "profile").write_csv(
-                args.data / "profile_summary_widest.csv"
-            )
-            interaction_test(pair_metrics, rng).write_csv(
-                args.data / "algorithm_interaction_widest.csv"
-            )
-        compare_algorithms_within_profile(test_metrics, rng).write_csv(
-            args.data / "algorithm_pairwise.csv"
-        )
-        compare_algorithms_within_profile(test_metrics, rng, metric="gain").write_csv(
-            args.data / "algorithm_pairwise_gain.csv"
-        )
-        learning_gain_tests(test_metrics, rng).write_csv(
-            args.data / "learning_gain.csv"
-        )
-        widening = gap_widening_tests(trajectory, rng)
-        if not widening.is_empty():
-            widening.write_csv(args.data / "gap_widening.csv")
-
-        lasers = laser_colour_analysis(args.logs, args.layout_data, curves)
-        if not lasers.is_empty():
-            lasers.write_csv(args.data / "laser_colour_effect.csv")
-
-    print(f"Wrote aggregates to {args.data} and figures to {args.plots}")
-    print(f"Common grid: {', '.join(profiles)} x {', '.join(shared)}")
-    print(f"Widest pair: {', '.join(pair_profiles)} x {', '.join(pair_shared)}")
+CERTIFICATE_IMPLICATIONS = (
+    ("interdependent", "chained"),
+    ("interdependent", "cooperative"),
+    ("chained", "cooperative"),
+    ("asymmetric", "cooperative"),
+    ("convergent", "cooperative"),
+    ("divergent", "cooperative"),
+)
+FAILURE_ALGORITHM_ORDER = ("qmix", "dqn", "vdn", "ippo", "mappo")
 
 
-if __name__ == "__main__":
-    main()
+def scan_certificate_episodes(path: Path, endpoint_only: bool) -> pl.LazyFrame:
+    """Read the episode columns needed for certificate validation."""
+    schema = pl.scan_csv(path).collect_schema().names()
+    use_test_num = (
+        "test_num" in schema
+        and pl.scan_csv(path).select(pl.col("test_num").null_count()).collect().item()
+        == 0
+    )
+    columns = [
+        "time_step",
+        *(["test_num"] if "test_num" in schema else []),
+        *AGENT_EXIT_COLUMNS,
+        *AGENT_ALIVE_COLUMNS,
+        *(f"{name}-trajectory" for name in PREDICATES),
+    ]
+    frame = pl.scan_csv(path).select(columns)
+    if endpoint_only:
+        frame = frame.filter(pl.col("time_step") == FINAL_STEP)
+    if use_test_num:
+        frame = frame.unique(
+            ["time_step", "test_num"], keep="last", maintain_order=True
+        )
+    return frame.with_columns(
+        pl.sum_horizontal(AGENT_EXIT_COLUMNS).alias("n_exited"),
+        (N_AGENTS - pl.sum_horizontal(AGENT_ALIVE_COLUMNS)).alias("n_dead"),
+    ).rename({f"{name}-trajectory": name for name in PREDICATES})
+
+
+def certificate_outcome_counts(frame: pl.LazyFrame, profile: str) -> pl.LazyFrame:
+    """Count predicate hits in each episode-outcome class."""
+    target = PROFILE_PREDICATES[profile]
+    return frame.group_by("n_exited").agg(
+        pl.len().alias("n_episodes"),
+        pl.col("n_dead").sum().alias("n_deaths"),
+        *(pl.col(name).sum().alias(f"n_{name}") for name in PREDICATES),
+        pl.col(target).sum().alias("n_target"),
+    )
+
+
+def certificate_violation_counts(frame: pl.LazyFrame, profile: str) -> pl.LazyFrame:
+    """Count certificate, theorem, and profile-inclusion violations."""
+    target = PROFILE_PREDICATES[profile]
+    winning = pl.col("n_exited") == N_AGENTS
+    theorem = pl.col("cooperative") != (pl.col("asymmetric") | pl.col("chained"))
+    aggregations = [
+        pl.len().alias("n_episodes"),
+        winning.sum().alias("n_winning"),
+        (winning & ~pl.col(target).cast(pl.Boolean)).sum().alias("n_certificate"),
+        (winning & ~pl.col("cooperative").cast(pl.Boolean))
+        .sum()
+        .alias("n_winning_not_cooperative"),
+        theorem.sum().alias("n_theorem"),
+    ]
+    aggregations += [
+        (pl.col(left).cast(pl.Boolean) & ~pl.col(right).cast(pl.Boolean))
+        .sum()
+        .alias(f"n_{left}_implies_{right}")
+        for left, right in CERTIFICATE_IMPLICATIONS
+    ]
+    return frame.select(aggregations)
+
+
+def collect_certificate_data(
+    log_root: Path, endpoint_only: bool
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Collect outcome and violation tables from the profile sweep."""
+    outcomes: list[pl.DataFrame] = []
+    violations: list[pl.DataFrame] = []
+    for profile, algorithm, directory in discover_experiments(log_root):
+        for run in sorted(directory.glob("run-*")):
+            seed = int(run.name.removeprefix("run-"))
+            context = {
+                "profile": pl.lit(profile),
+                "algorithm": pl.lit(algorithm),
+                "seed": pl.lit(seed),
+            }
+            for pool, filename in POOL_FILES.items():
+                if not has_data(run / filename):
+                    continue
+                frame = scan_certificate_episodes(run / filename, endpoint_only)
+                tagged = {"pool": pl.lit(pool), **context}
+                outcomes.append(
+                    certificate_outcome_counts(frame, profile)
+                    .collect()
+                    .with_columns(**tagged)
+                )
+                violations.append(
+                    certificate_violation_counts(frame, profile)
+                    .collect()
+                    .with_columns(**tagged)
+                )
+        print(f"  scanned {profile}/{algorithm}", flush=True)
+    return pl.concat(outcomes), pl.concat(violations)
+
+
+def summarize_failure_episodes(path: Path) -> dict[str, object] | None:
+    """Summarize one run's held-out final-checkpoint outcomes."""
+    episodes = (
+        pl.read_csv(
+            path,
+            columns=[
+                "time_step",
+                "test_num",
+                "exit_rate",
+                "episode_len",
+                *AGENT_EXIT_COLUMNS,
+                *AGENT_ALIVE_COLUMNS,
+            ],
+        )
+        .filter(pl.col("time_step") == FINAL_STEP)
+        .unique("test_num", keep="last", maintain_order=True)
+    )
+    if episodes.is_empty():
+        return None
+    episodes = episodes.with_columns(
+        pl.sum_horizontal(AGENT_EXIT_COLUMNS).alias("n_exited"),
+        (N_AGENTS - pl.sum_horizontal(AGENT_ALIVE_COLUMNS)).alias("n_dead"),
+    )
+    return episodes.select(
+        pl.col("exit_rate").mean(),
+        pl.col("n_dead").mean().alias("deaths"),
+        (pl.col("n_dead") > 0).mean().alias("death_share"),
+        (pl.col("n_exited") == N_AGENTS).sum().alias("joint_count"),
+        pl.col("episode_len").mean().alias("length"),
+        pl.len().alias("n_episodes"),
+    ).row(0, named=True)
+
+
+def collect_failure_runs(log_root: Path) -> pl.DataFrame:
+    """Collect final-checkpoint failure outcomes for the profile sweep."""
+    rows: list[dict[str, object]] = []
+    for profile, algorithm, directory in discover_experiments(log_root):
+        for run in sorted(directory.glob("run-*")):
+            path = run / POOL_FILES["test"]
+            if not has_data(path):
+                continue
+            outcomes = summarize_failure_episodes(path)
+            if outcomes is not None:
+                rows.append(
+                    {"profile": profile, "algorithm": algorithm, "seed": run.name}
+                    | outcomes
+                )
+    if not rows:
+        raise FileNotFoundError(
+            f"No held-out final-checkpoint episodes found under {log_root}"
+        )
+    return pl.DataFrame(rows)
+
+
+def aggregate_failures(runs: pl.DataFrame) -> pl.DataFrame:
+    """Average failure shares by profile and then equally across profiles."""
+    metrics = ("exit_rate", "deaths", "death_share", "length")
+    shares = (
+        runs.group_by("algorithm", "profile")
+        .agg(pl.col(*metrics).mean())
+        .group_by("algorithm")
+        .agg(pl.col(*metrics).mean())
+    )
+    counts = runs.group_by("algorithm").agg(
+        pl.col("joint_count").sum(), pl.col("n_episodes").sum()
+    )
+    return shares.join(counts, on="algorithm")
+
+
+def format_failure_table(summary: pl.DataFrame, *, show_count: bool) -> str:
+    """Render the death/timeout/joint-success LaTeX table."""
+    total_episodes = int(summary["n_episodes"][0])
+    lines = [
+        r"    \begin{tabular}{lcccccc}",
+        r"        \toprule",
+        r"        \multirow{2}{*}{\textbf{Algorithm}} & \multirow{2}{*}{\textbf{Exit rate}} & \multirow{2}{*}{\textbf{Deaths/episode}} & \multicolumn{3}{c}{\textbf{Episode outcome}} & \multirow{2}{*}{\textbf{Length}}\\",
+        r"        \cmidrule(lr){4-6}",
+        r"        & & & Death & Timeout & Joint success & \\",
+        r"        \midrule",
+    ]
+    for algorithm in FAILURE_ALGORITHM_ORDER:
+        row = summary.filter(pl.col("algorithm") == algorithm).row(0, named=True)
+        death_pct = round(row["death_share"] * 100)
+        joint_count = int(row["joint_count"])
+        joint = f"{100 * joint_count / total_episodes:.3f}\\%"
+        if show_count:
+            joint += f" ({joint_count}/\\num{{{total_episodes}}})"
+        lines.append(
+            f"        {ALGORITHM_LABELS[algorithm]:<9} & {row['exit_rate']:.3f} "
+            f"& {row['deaths']:.2f} & {death_pct}\\% & {100 - death_pct}\\% "
+            f"& {joint} & {row['length']:.1f}\\\\"
+        )
+    lines += [r"        \bottomrule", r"    \end{tabular}"]
+    return "\n".join(lines) + "\n"
+
+
+def collect_laser_layout_scores(log_root: Path, layout_data: Path) -> pl.DataFrame:
+    """Average endpoint outcomes by profile, algorithm, layout, and agent."""
+    frames: list[pl.DataFrame] = []
+    for profile, algorithm, directory in discover_experiments(log_root):
+        runs: list[pl.DataFrame] = []
+        for run in sorted(directory.glob("run-*")):
+            path = run / POOL_FILES["test"]
+            if not path.exists():
+                continue
+            episodes = (
+                pl.read_csv(
+                    path, columns=["time_step", "test_num", *AGENT_EXIT_COLUMNS]
+                )
+                .filter(pl.col("time_step") == FINAL_STEP)
+                .unique("test_num", keep="last", maintain_order=True)
+            )
+            if episodes.height != EVAL_EPISODES:
+                continue
+            for agent, column in enumerate(AGENT_EXIT_COLUMNS):
+                runs.append(
+                    episodes.select(
+                        (pl.col("test_num") + EVAL_EPISODES).alias("layout_index"),
+                        pl.lit(agent).alias("agent"),
+                        pl.col(column).cast(pl.Float64).alias("exited"),
+                    )
+                )
+        if not runs:
+            continue
+        scores = (
+            pl.concat(runs)
+            .group_by("layout_index", "agent")
+            .agg(pl.col("exited").mean(), pl.len().alias("n_seeds"))
+            .with_columns(
+                pl.lit(profile).alias("profile"),
+                pl.lit(algorithm).alias("algorithm"),
+            )
+        )
+        colours = pl.read_csv(
+            layout_data / f"{LAYOUT_FAMILIES[profile]}-laser-colours.csv"
+        ).rename({"index": "layout_index"})
+        for agent in range(N_AGENTS):
+            colours = colours.with_columns(
+                (pl.col(f"laser-{agent}") > 0).alias(f"matched-{agent}")
+            )
+        frames.append(
+            scores.join(colours, on="layout_index", how="left")
+            .with_columns(
+                pl.when(pl.col("agent") == agent)
+                .then(pl.col(f"matched-{agent}"))
+                .otherwise(None)
+                .alias(f"is-matched-{agent}")
+                for agent in range(N_AGENTS)
+            )
+            .with_columns(
+                pl.coalesce(
+                    *(f"is-matched-{agent}" for agent in range(N_AGENTS))
+                ).alias("matched")
+            )
+            .select(
+                "profile",
+                "algorithm",
+                "layout_index",
+                "agent",
+                "n_seeds",
+                "matched",
+                "exited",
+            )
+        )
+    if not frames:
+        raise FileNotFoundError("No complete endpoint evaluations were found.")
+    result = pl.concat(frames)
+    if set(result["n_seeds"].unique()) != {30}:
+        raise ValueError("Every layout score must average exactly 30 seeds.")
+    return result
+
+
+def laser_layout_contrasts(
+    scores: pl.DataFrame, group_columns: list[str]
+) -> pl.DataFrame:
+    keys = list(dict.fromkeys([*group_columns, "profile", "layout_index"]))
+    matched = (
+        scores.filter("matched")
+        .group_by(keys)
+        .agg(pl.col("exited").mean().alias("matched_rate"))
+    )
+    absent = (
+        scores.filter(~pl.col("matched"))
+        .group_by(keys)
+        .agg(pl.col("exited").mean().alias("absent_rate"))
+    )
+    return matched.join(absent, on=keys).with_columns(
+        (pl.col("matched_rate") - pl.col("absent_rate")).alias("difference")
+    )
+
+
+def summarize_laser_bootstrap(
+    contrasts: pl.DataFrame,
+    group_columns: list[str],
+    rng: np.random.Generator,
+) -> pl.DataFrame:
+    groups = (
+        contrasts.partition_by(group_columns, as_dict=True)
+        if group_columns
+        else {("overall",): contrasts}
+    )
+    rows: list[dict[str, object]] = []
+    for key, group in groups.items():
+        key = key if isinstance(key, tuple) else (key,)
+        arrays = [
+            profile.sort("layout_index")
+            .select("matched_rate", "absent_rate", "difference")
+            .to_numpy()
+            for profile in group.partition_by("profile")
+        ]
+        samples = np.empty((N_BOOTSTRAPS, 3), dtype=float)
+        for index in range(N_BOOTSTRAPS):
+            samples[index] = np.mean(
+                [
+                    values[rng.integers(0, len(values), len(values))].mean(axis=0)
+                    for values in arrays
+                ],
+                axis=0,
+            )
+        estimate = np.mean([values.mean(axis=0) for values in arrays], axis=0)
+        low, high = np.quantile(samples[:, 2], [0.025, 0.975])
+        row = dict(zip(group_columns, key, strict=True)) if group_columns else {}
+        rows.append(
+            row
+            | {
+                "matched_rate": estimate[0],
+                "absent_rate": estimate[1],
+                "difference": estimate[2],
+                "ci_low": low,
+                "ci_high": high,
+                "n_layouts": group.select("profile", "layout_index").unique().height,
+                "n_bootstraps": N_BOOTSTRAPS,
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def laser_permutation_p_value(scores: pl.DataFrame, rng: np.random.Generator) -> float:
+    averaged = scores.group_by("profile", "layout_index", "agent").agg(
+        pl.col("exited").mean(), pl.col("matched").first()
+    )
+    strata: list[tuple[np.ndarray, np.ndarray]] = []
+    for profile in averaged.partition_by("profile"):
+        outcomes = (
+            profile.pivot(on="agent", index="layout_index", values="exited")
+            .sort("layout_index")
+            .select(*(str(agent) for agent in range(N_AGENTS)))
+            .to_numpy()
+        )
+        missing = (
+            profile.filter(~pl.col("matched")).sort("layout_index")["agent"].to_numpy()
+        )
+        strata.append((outcomes, missing))
+
+    def statistic(labels: list[np.ndarray]) -> float:
+        differences = []
+        for (outcomes, _), missing in zip(strata, labels, strict=True):
+            absent = outcomes[np.arange(len(outcomes)), missing]
+            matched = (outcomes.sum(axis=1) - absent) / (N_AGENTS - 1)
+            differences.append(float(np.mean(matched - absent)))
+        return float(np.mean(differences))
+
+    observed = abs(statistic([missing for _, missing in strata]))
+    extreme = sum(
+        abs(statistic([rng.permutation(missing) for _, missing in strata]))
+        >= observed - 1e-12
+        for _ in range(N_PERMUTATIONS)
+    )
+    return (extreme + 1) / (N_PERMUTATIONS + 1)
+
+
+def summarize_agent_exits(scores: pl.DataFrame) -> pl.DataFrame:
+    return scores.group_by("agent").agg(pl.col("exited").mean()).sort("agent")

@@ -1,14 +1,25 @@
-"""Summarize the acceptance-rate experiment into plots and a LaTeX table."""
+"""Acceptance-rate experiments, summaries, plots, and tables."""
 
 from __future__ import annotations
 
-import argparse
+import csv
 import time
+from collections.abc import Callable
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    as_completed,
+    wait,
+)
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import polars as pl
-from acceptance_rates_experiment import build_generator
+from lle import World, characterize
+from lle.characterization.world_characterization import WorldCharacterizer
+from lle.generator.generator import WorldGenerator
+from tqdm import tqdm
 
 plt.rcParams.update(
     {
@@ -35,6 +46,28 @@ SUMMARY_CSV = Path("data/acceptance-rates-summary.csv")
 PLOTS_DIR = Path("plots")
 TABLE_OUTPUT = Path("tables/certification-yield-table.tex")
 
+WIDTH = 9
+HEIGHT = 9
+N_AGENTS = 3
+N_LASERS = 2
+
+ACCEPTANCE_PREDICATES: dict[str, Callable[[WorldCharacterizer], bool]] = {
+    "cooperative": lambda c: c.is_cooperative(),
+    "asymmetric": lambda c: c.is_asymmetric(),
+    "sequential-2": lambda c: c.is_sequential(length=2),
+    "divergent-2": lambda c: c.is_divergent(k=2),
+    "convergent-2": lambda c: c.is_convergent(k=2),
+    "interdependent-2": lambda c: c.is_interdependent(n_agents=2),
+    "fully-coupled": lambda c: c.is_fully_coupled(),
+    "solvable": lambda c: c.is_solvable(),
+}
+ACCEPTANCE_TIME_FIELDS = [f"{name}-time" for name in ACCEPTANCE_PREDICATES]
+ACCEPTANCE_FIELDNAMES = [
+    "layout",
+    *ACCEPTANCE_PREDICATES,
+    *ACCEPTANCE_TIME_FIELDS,
+]
+
 PROFILES = [
     "solvable",
     "cooperative",
@@ -56,81 +89,81 @@ LABELS = {
     "fully-coupled": r"$\mathrm{Fully}$",
     "solvable": "Solvable",
 }
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse CLI options for the acceptance-rate summary.
-
-    @ai-generated
-    """
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--data",
-        type=Path,
-        default=DATA_CSV,
-        help="Acceptance-rate CSV (default: %(default)s)",
-    )
-
-    parser.add_argument(
-        "--negative-query-data",
-        type=Path,
-        default=NEGATIVE_QUERY_DATA_CSV,
-        help="End-to-end no-profile-x timing CSV (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--summary-csv",
-        type=Path,
-        default=SUMMARY_CSV,
-        help="Where to write the per-profile summary CSV (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--plots-dir",
-        type=Path,
-        default=PLOTS_DIR,
-        help="Directory for the generated plots (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--table-output",
-        type=Path,
-        default=TABLE_OUTPUT,
-        help="Where to write the LaTeX table (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--fully",
-        action="store_true",
-        help=(
-            "Also plot the fully-coupled profile. Excluded by default: it is "
-            "not satisfiable with 3 agents and 2 lasers, so it always shows a "
-            "0%% acceptance rate."
-        ),
-    )
-    parser.add_argument(
-        "--ci",
-        action="store_true",
-        help="Show 95%% Wilson confidence intervals in the LaTeX table.",
-    )
-    parser.add_argument(
-        "--generation-samples",
-        type=int,
-        default=100,
-        help=(
-            "Number of layouts generated to calibrate the single-core mean "
-            "generation time (default: %(default)s)"
-        ),
-    )
-    parser.add_argument(
-        "--y-ellipsis",
-        action="store_true",
-        help=(
-            "Split the acceptance-rate bar plot's y-axis into a broken "
-            "(ellipsis) scale, so a much larger bar (e.g. 'solvable') does "
-            "not flatten the smaller ones."
-        ),
-    )
-    return parser.parse_args()
-
-
 WILSON_Z = 1.96
+
+
+def build_generator() -> WorldGenerator:
+    """Build an unbiased world generator without an acceptance predicate."""
+    return WorldGenerator(
+        width=WIDTH, height=HEIGHT, n_agents=N_AGENTS, n_lasers=N_LASERS
+    )
+
+
+def characterize_layout(layout: str, t_max: int) -> dict[str, object]:
+    """Characterize one layout against every acceptance predicate."""
+    row: dict[str, object] = {"layout": layout}
+    for name, predicate in ACCEPTANCE_PREDICATES.items():
+        characterizer = characterize(World(layout), t_max)
+        start = time.perf_counter()
+        row[f"{name}-time"] = time.perf_counter() - start
+        row[name] = predicate(characterizer)
+    return row
+
+
+def count_existing_rows(output: Path) -> int:
+    """Count completed rows so an interrupted experiment can resume."""
+    if not output.exists() or output.stat().st_size == 0:
+        return 0
+    with output.open(newline="") as existing_file:
+        reader = csv.reader(existing_file)
+        next(reader, None)
+        return sum(1 for _ in reader)
+
+
+def run_experiment(
+    n_layouts: int,
+    n_workers: int,
+    t_max: int,
+    seed: int | None,
+    output: Path,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Generate and characterize random layouts, resuming an existing CSV."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    existing_rows = 0 if overwrite else count_existing_rows(output)
+    remaining = n_layouts - existing_rows
+    if remaining <= 0:
+        print(f"{output} already has {existing_rows} rows (>= {n_layouts} requested)")
+        return
+
+    generator = build_generator()
+    pending: set[Future] = set()
+    mode = "a" if existing_rows else "w"
+    with output.open(mode, newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=ACCEPTANCE_FIELDNAMES)
+        if not existing_rows:
+            writer.writeheader()
+            output_file.flush()
+        with (
+            ProcessPoolExecutor(max_workers=n_workers) as executor,
+            tqdm(total=remaining, unit="layout", smoothing=0.01) as progress,
+        ):
+            for world in generator.generate_n(
+                remaining, n_jobs=1, seed=seed, quiet=True
+            ):
+                pending.add(
+                    executor.submit(characterize_layout, world.world_string, t_max)
+                )
+                if len(pending) >= n_workers * 4:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        writer.writerow(future.result())
+                        output_file.flush()
+                        progress.update()
+            for future in as_completed(pending):
+                writer.writerow(future.result())
+                progress.update()
 
 
 def wilson_interval(
@@ -263,7 +296,6 @@ def plot_timing(summary: pl.DataFrame, plots_dir: Path) -> None:
     ax.grid(True, axis="y", which="both")
 
     plots_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(plots_dir / "acceptance-timing.png", dpi=180, bbox_inches="tight")
     fig.savefig(plots_dir / "acceptance-timing.pdf", bbox_inches="tight")
     plt.close(fig)
 
@@ -305,7 +337,6 @@ def plot_acceptance(
         ax.grid(True, axis="y")
 
         plots_dir.mkdir(parents=True, exist_ok=True)
-        fig.savefig(plots_dir / "acceptance-rates.png", dpi=180, bbox_inches="tight")
         fig.savefig(plots_dir / "acceptance-rates.pdf", bbox_inches="tight")
         plt.close(fig)
         return
@@ -362,7 +393,6 @@ def plot_acceptance(
     ax_low.set_xticklabels(labels)
 
     plots_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(plots_dir / "acceptance-rates.png", dpi=180, bbox_inches="tight")
     fig.savefig(plots_dir / "acceptance-rates.pdf", bbox_inches="tight")
     plt.close(fig)
 
@@ -441,43 +471,3 @@ def format_table(
         )
     lines += [r"        \bottomrule", r"    \end{tabular}"]
     return "\n".join(lines) + "\n"
-
-
-def main() -> None:
-    """Generate the acceptance-rate plots, summary CSV and LaTeX table.
-
-    @ai-generated
-    """
-    args = parse_args()
-    data = pl.read_csv(args.data)
-    negative_query_data = pl.read_csv(args.negative_query_data)
-    table_summary = summarize(data, negative_query_data, [*PROFILES, FULLY_COUPLED])
-    summary = (
-        table_summary
-        if args.fully
-        else table_summary.filter(pl.col("profile") != FULLY_COUPLED)
-    )
-
-    args.summary_csv.parent.mkdir(parents=True, exist_ok=True)
-    summary.write_csv(args.summary_csv)
-
-    plot_timing(summary, args.plots_dir)
-    plot_acceptance(summary, args.plots_dir, y_ellipsis=args.y_ellipsis)
-
-    generation_time_s = measure_generation_time(args.generation_samples)
-    table = format_table(table_summary, generation_time_s, include_ci=args.ci)
-    args.table_output.parent.mkdir(parents=True, exist_ok=True)
-    args.table_output.write_text(table)
-
-    print(f"Wrote {args.summary_csv}")
-    print(f"Wrote {args.plots_dir / 'acceptance-timing.png'} (+ .pdf)")
-    print(f"Wrote {args.plots_dir / 'acceptance-rates.png'} (+ .pdf)")
-    print(
-        f"Measured single-core generation time: {generation_time_s * 1000:.3f} ms/layout "
-        f"(n={args.generation_samples})"
-    )
-    print(f"Wrote {args.table_output}")
-
-
-if __name__ == "__main__":
-    main()

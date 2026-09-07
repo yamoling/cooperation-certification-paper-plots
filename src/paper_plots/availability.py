@@ -10,7 +10,6 @@ reports as missing is missing *right now*.
 
 from __future__ import annotations
 
-import argparse
 import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -87,33 +86,6 @@ class Run:
             self.legacy_last_step.values()
         )
         return max(steps) if steps else None
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse the directories to inspect.
-
-    @ai-generated
-    """
-    parser = argparse.ArgumentParser(
-        description="Summarise missing data in the cooperation-profile experiment."
-    )
-    parser.add_argument("--logs", type=Path, default=Path("logs"))
-    parser.add_argument(
-        "--seeds",
-        type=int,
-        default=EXPECTED_SEEDS,
-        help="Seeds expected per configuration.",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("data-summary.md"),
-        help="Markdown report to write.",
-    )
-    parser.add_argument(
-        "--json", type=Path, default=None, help="Also write the findings as JSON."
-    )
-    return parser.parse_args()
 
 
 def human_step(step: int) -> str:
@@ -426,25 +398,25 @@ def render_markdown(
     return "\n".join(lines), summaries
 
 
-def main() -> None:
-    """Write the availability report for the cooperation-profile sweep.
-
-    @ai-generated
-    """
-    args = parse_args()
-    if not args.logs.is_dir():
-        raise SystemExit(f"No log directory at {args.logs}")
-
-    runs, _, _ = collect(args.logs)
-    runs = [run for run in runs if 0 <= run.seed < args.seeds]
-    report, summaries = render_markdown(group_runs(runs), args.seeds, args.logs)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(report)
-    print(f"Markdown report written to {args.output}")
-
-    if args.json:
-        args.json.parent.mkdir(parents=True, exist_ok=True)
-        args.json.write_text(
+def write_report(
+    logs: Path,
+    output: Path,
+    *,
+    expected_seeds: int = EXPECTED_SEEDS,
+    json_output: Path | None = None,
+) -> None:
+    """Write Markdown and optional JSON availability reports."""
+    if not logs.is_dir():
+        raise FileNotFoundError(f"No log directory at {logs}")
+    runs, _, _ = collect(logs)
+    runs = [run for run in runs if 0 <= run.seed < expected_seeds]
+    report, summaries = render_markdown(group_runs(runs), expected_seeds, logs)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(report)
+    print(f"Markdown report written to {output}")
+    if json_output:
+        json_output.parent.mkdir(parents=True, exist_ok=True)
+        json_output.write_text(
             json.dumps(
                 {
                     f"{profile}-{algorithm}": summary
@@ -454,8 +426,4 @@ def main() -> None:
                 sort_keys=True,
             )
         )
-        print(f"JSON written to {args.json}")
-
-
-if __name__ == "__main__":
-    main()
+        print(f"JSON written to {json_output}")
