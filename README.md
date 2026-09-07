@@ -8,8 +8,8 @@ Generation_ (Molinghen & Charels). It contains:
   layout pools into the paper's figures, tables and aggregated CSVs.
 - [`data/`](data/) — the aggregated/derived CSVs the scripts produce (tracked in
   git; see [`data/toc.md`](data/toc.md) for a file-by-file description).
-- [`latex/`](latex/) — the paper's LaTeX source, including the actual `plots/`
-  and `pictures/` the compiled paper embeds.
+- [`latex/`](latex/) — the paper's LaTeX source.
+- `plots/` — every generated figure, in PDF format.
 - `logs/` and `layouts/` — raw experiment data and generated layout pools,
   downloaded separately (see below) and not tracked in git.
 
@@ -63,21 +63,23 @@ unzip layouts.zip
 Once `logs/` and `layouts/` are in place:
 
 ```bash
-uv run python scripts/generate_all.py
+uv run python scripts/generate_data.py
+uv run python scripts/plot_data.py
 ```
 
-This regenerates every figure and table backed by the downloaded data (a few
-minutes on a modern multi-core machine, dominated by the cooperation-profile
-sweep). It writes:
+The first command scans the downloaded logs/layouts and writes reusable CSVs;
+the second reads those CSVs and renders the figures, LaTeX fragments, and
+console reports. This separation lets plots be restyled or selectively rendered
+without repeating the expensive analysis. A full data pass takes a few minutes
+on a modern multi-core machine and is dominated by the cooperation-profile
+sweep. Together, the commands write:
 
 - CSVs to `data/`
-- the paper's figures directly into `latex/plots/` and `latex/pictures/`
-  (so `git diff` shows exactly what changed against the committed originals)
+- every generated figure as a PDF in `plots/`
 - generated LaTeX table fragments into `tables/` (gitignored scratch output —
   the paper's own tables are hand-written in
   `latex/content.tex`/`latex/appendix.tex`; use `tables/*.tex` to check their
   numbers still match, and update the paper source if they don't)
-- a few exploratory, paper-unrelated figures into `plots/` (also gitignored)
 
 By default, the `pool-characteristics` target only characterizes the first
 1000 layouts of each canonical pool (a few minutes; the full pools run into
@@ -86,47 +88,47 @@ time). Pass `--layout-limit` to change that, e.g. to characterize every layout
 of every pool instead:
 
 ```bash
-uv run python scripts/generate_all.py --layout-limit 0
+uv run python scripts/generate_data.py --layout-limit 0
 ```
 
-## 4. Generate a single plot or table
+## 4. Generate or plot selected data
 
-List the available targets:
+List the available data and presentation targets:
 
 ```bash
-uv run python scripts/generate_all.py --list
+uv run python scripts/generate_data.py --list
+uv run python scripts/plot_data.py --list
 ```
 
-Then run one or more of them by name:
+Run one or more targets either positionally or with repeatable keyword options:
 
 ```bash
-uv run python scripts/generate_all.py coop-profiles
-uv run python scripts/generate_all.py generalization sat-duration
+uv run python scripts/generate_data.py generalization sat-duration
+uv run python scripts/plot_data.py generalization sat-duration
+
+# Equivalent keyword form
+uv run python scripts/generate_data.py --generalization --sat-duration
+uv run python scripts/plot_data.py --generalization --sat-duration
 ```
 
-Each target is a thin wrapper around one of the scripts in `scripts/`; every
-script also runs standalone with its own `--help` for finer control (custom
-input/output paths, a single figure instead of a full run, etc.):
+The cooperation-profile presentation can also be selected at figure granularity:
 
 ```bash
-uv run python scripts/coop_profiles.py --help
+uv run python scripts/plot_data.py --coop-gap --coop-heatmap
 ```
 
-| Target                           | What it reproduces                                                                                                                                       |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `coop-profiles`                  | The cooperation-profile sweep: `coop-profiles-{difficulty,gap,heatmaps}` figures, the algorithm x profile table, and ~30 supporting CSVs in `data/`.     |
-| `coop-profile-certificates`      | Certificate/completeness-theorem validation and outcome-conditioned predicate tables (`apx:tab:coop-profile-exit-outcomes`, `tab:coop-profile-summary`). |
-| `coop-profile-failures`          | The death/timeout/joint-success table (`tab:coop-profile-failures`).                                                                                     |
-| `laser-colour`                   | Whether an agent exits more often when a laser of its own colour is present.                                                                             |
-| `pool-characteristics`           | Cooperation-predicate incidence across each canonical layout pool.                                                                                       |
-| `layouts-picture`                | `pictures/layouts.pdf` — sampled layouts per canonical profile pool.                                                                                     |
-| `generalization-layouts-picture` | `pictures/generalization-layouts-5x5.pdf` — sampled 5x5 independent/cooperative layouts.                                                                 |
-| `generalization`                 | `latex/plots/generalization-joint-5x5.pdf` — the pool-size generalization figure.                                                                        |
-| `sat-duration`                   | `latex/plots/solving_duration-comparison.pdf` — SAT construction/solving duration vs. horizon.                                                           |
-| `acceptance-rates`               | The certification-yield table and the certification acceptance-rate/timing plots.                                                                        |
-| `exit-outcomes`                  | `tab:exit-outcomes` — the 5x5-sweep exit-outcome table.                                                                                                  |
-| `trajectory-profiles`            | Per-episode cooperation-predicate rates backing the results-section prose.                                                                               |
-| `exit-rate-distribution`         | A second, independent computation of the exit-outcome distribution.                                                                                      |
+Existing generated data is reused by default. Pass `--overwrite` to rerun the
+selected data target and replace its outputs:
+
+```bash
+uv run python scripts/generate_data.py --generalization --overwrite
+```
+
+`generate_data.py --help` documents shared input/output controls such as
+`--logs`, `--data`, `--layouts`, `--refresh`, and `--layout-limit`.
+`plot_data.py --help` documents output destinations and rendering controls.
+These are the project's only two executable entry points; implementation code
+is grouped by scientific domain under `src/paper_plots/`.
 
 ## 5. Compiling the paper
 
@@ -141,28 +143,39 @@ regenerating data, diff the relevant `tables/*.tex` fragment against the
 corresponding table in `latex/content.tex`/`latex/appendix.tex` to confirm the
 numbers still agree before editing the paper source.
 
-## 6. Additional tools (not part of `generate_all.py`)
+## 6. Additional tools (not part of the default data/plot pass)
 
-These either regenerate raw measurement data from scratch (slow, and the
-results are already committed under `data/`) or are one-off/manual tools, so
-they are documented here rather than wired into the default pipeline:
+These operations are excluded from the default pass because they are slow or
+require a specific input. They remain available as opt-in targets:
 
-- `scripts/acceptance_rates_experiment.py` — resamples and re-certifies random
-  layouts to rebuild `data/acceptance-rates.csv` (hours for the full 100k-layout
-  run used in the paper).
-- `scripts/sat_measurements_mode.py` — reruns the SAT clause-ablation sweep
-  that produces `data/sat-measurements-mode.csv`.
-- `scripts/generate_layouts.py` — generates new `Independent`-predicate
-  layouts; the profile pools themselves come from the downloaded
-  `layouts.zip`, not from this script.
-- `scripts/extract_test_set_lasers.py` — recomputes a `<pool>-laser-colours.csv`
-  from a directory of layout files, given the specific layout subset used as a
-  pool.
-- `scripts/draw_trajectory.py` — solves (or replays a supplied trajectory
-  through) a single layout and renders it; used to hand-compose the
-  `pictures/{detour,free-help-*}.png` illustrations.
-- `scripts/data-availability-summary.py` — prints a markdown snapshot of which
-  `logs/` runs are complete; a diagnostic tool, not a paper figure/table.
+```bash
+# Rebuild the raw 100k-layout acceptance experiment (slow)
+uv run python scripts/generate_data.py --acceptance-raw
+
+# Rerun the SAT clause-ablation measurements
+uv run python scripts/generate_data.py --sat-ablation
+
+# Generate an Independent-predicate layout pool
+uv run python scripts/generate_data.py --generate-layouts \
+    --layout-output layouts/generated/independent
+
+# Extract laser counts from a particular pool
+uv run python scripts/generate_data.py --laser-counts \
+    --layout-source layouts/canonical/asymmetric
+
+# Report which experiment runs and checkpoints are available
+uv run python scripts/generate_data.py --availability
+
+# Solve or replay one trajectory and render it
+uv run python scripts/plot_data.py --trajectory \
+    --layout layouts/example.txt --labelled
+```
+
+The SAT-duration and acceptance-rate summaries depend on precomputed raw
+experiment CSVs. If those files are stored elsewhere, provide them with
+`--sat-source`, `--acceptance-source`, and `--negative-query-source`. A default
+pass reports and skips an unavailable source instead of aborting the remaining
+targets.
 
 ## Notes on the data layout
 
@@ -170,8 +183,7 @@ they are documented here rather than wired into the default pipeline:
   `canonical-<profile>-<algorithm>-1M-0.5k/run-<seed>/`, each holding the
   final-policy evaluation files (`test-policy-on-{train,test}-envs.csv`) that
   every analysis script reads, plus the older `test.csv`/`train.csv` on-policy
-  endpoint that some analyses (e.g. `data-availability-summary.py`) still
-  track for completeness.
+  endpoint that the `availability` target still tracks for completeness.
 - `layouts/canonical/<profile>/` holds the layout pools used by the
   cooperation-profile sweep (`asymmetric`, `convergent-2`, `divergent-2`,
   `sequential-2`, `interdependent-2`); `layouts/tuning/{cooperative,independent}/`
