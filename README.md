@@ -13,7 +13,7 @@ The structure of this repo is as follows:
 
 ## 1. Requirements
 
-- [`uv`](https://docs.astral.sh/uv/) (manages the Python 3.14 virtual environment and dependencies; this project does not run under a plain `python`/`pip` setup).
+- [`uv`](https://docs.astral.sh/uv/) to manage python dependencies.
 - Enough disk space for the raw logs archive (~2.5 GB compressed, ~12 GB extracted) and the layouts archive (~15 MB compressed).
 
 ## 2. Download the raw data
