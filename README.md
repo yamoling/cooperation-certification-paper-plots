@@ -1,6 +1,10 @@
 # Certifying Cooperation — reproducibility repository
 
-This repository reproduces every plot, table and derived data file used in _Certifying Cooperation: A Novel Approach to Cooperative Multi-Agent Task Generation_ (Molinghen & Charels). It contains:
+This repository reproduces every plot, table and derived data file used in _Certifying Cooperation: A Novel Approach to Cooperative Multi-Agent Task Generation_ (Molinghen, Charels & Lenaerts). The material is based on two data sources:
+- The pool layouts available on [zenodo](https://zenodo.org/records/22640557).
+- The raw logging data available [here](https://permalink.ulb.be/t/0geWoPXRKJ).
+
+The structure of this repo is as follows:
 
 - [`scripts/`](scripts/) — the Python pipeline that turns raw experiment logs and layout pools into the paper's figures, tables and aggregated CSVs.
 - [`data/`](data/) — the aggregated/derived CSVs the scripts produce (tracked in git; see [`data/toc.md`](data/toc.md) for a file-by-file description).
